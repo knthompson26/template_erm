@@ -1,0 +1,476 @@
+---
+title: "Environmental-REML template code" 
+author: "Katherine Nina Thompson"
+date: "2024-07-30"
+output:  
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: 2
+    toc_float:
+      collapsed: false
+    number_sections: false
+    highlight: monochrome
+    theme: flatly
+    code_folding: show
+    includes:
+      after_body: footer.html
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      comment = NA,
+                      prompt = FALSE,
+                      cache = FALSE,
+                      message = FALSE,
+                      warning = FALSE,
+                      results = 'markup')
+
+options(bitmapType = 'quartz') # to render fonts better
+```
+
+```{r Clear global environment, include=FALSE}
+remove(list = ls())
+```
+
+```{r Load packages, include=FALSE}
+library(knitr)
+library(haven)
+library(psych) 
+library(tidyr)
+library(lavaan)
+library(tidyverse)
+library(dplyr) #conflicts with tidyverse for e.g. rename and row_number
+```
+
+```{r set seed, include=FALSE}
+# Set seed for reproducibility
+set.seed(123)
+```
+
+# Introduction
+
+This script will provide a template script to run environmental restricted maximum likelihood (E-REML) analyses on clean data and is written by K N Thompson, any questions please email thom1336@purdue.edu.
+
+Steps to enter the entirety of environmental data set as random effects in a linear mixed model:
+1. Prepare data: All data must be in binary format (0,1), therefore categorical variables must be numerically and then dummy coded. Identify which variables will be included in the predictor matrix, and which will be included as covariates. 
+2. Conduct PCA to account for colinearity in the data: This step is suggested by Zhou and Lee (2021) to avoid biasing the model. 
+3. Calculate enviromental-relatedness matrix (or several)
+4. Compute mixed linear model including ERMs and covariates
+
+The ERMs can be computed using several software. Here I outline how to use OSCA to run these analyses, but Zhou and Lee have developed code for this in MTAG. Paper: https://doi.org/10.1038/s41598-021-00427-y Code: https://github.com/honglee0707/IGE 
+
+# Demonstration of relatedness matrices
+
+To begin with we will manually demonstrate the calculations for the relatedness matrices.
+
+## GRM
+
+Below are the calculations from Yang et al on how to create a genetic relatedness matrix. 
+
+GCTA: https://zjuwhw.github.io/2021/08/20/GRM.html
+
+```{r GRM demo}
+# function in R to run a GRM
+# A = GRM(dat) # based on .bed files
+
+# to mimic a SNP dataset with 5 people and three SNPS
+n=5; m=3
+set.seed(10)
+p = runif(m, min=0.2, max=0.5) ### allele frequency were draw from a uniform distribution
+x_A1 = t(replicate(n, rbinom(m, 1, p)))   ### for the plink ped file
+x_A2 = t(replicate(n, rbinom(m, 1, p)))
+x = x_A1 + x_A2
+colnames(x) = paste("SNP",1:m,sep="")
+rownames(x) = paste("indi", 1:n, sep="")
+x
+
+# creating p value in GRM equation
+p_hat = apply(x, 2, sum)/(2*n) # apply across all columns (2) in x - sum the number of SNPs across all 5 individuals then divide this by 2*5
+
+w = apply(rbind(x,p_hat), 2, function(x) (x-2*x[length(x)]) / sqrt(2*x[length(x)]*(1-x[length(x)])))[1:n,]
+w
+
+A = w %*% t(w) /m
+A
+
+diag(A)
+```
+
+## ERM
+
+To create the environmental-relatedness matrix (ERM), we will adapt the equation for covariance between two variables. Instead of estimating the similarity between two variables across all individuals, **we will estimate the similarity between two individuals across all variables**. 
+
+### Dummy data 
+
+10 individuals and 6 variables. 
+Used naming from Add Health variables, but this is not Add Health data - this is simulated data. 
+
+```{r subset of data}
+num_individuals <- 10
+
+# generate dataset with 6 binary variables
+dat.erm.sub <- tibble(
+  H1GH8_numeric = rbinom(num_individuals, 1, 0.5),
+  H1GH9_numeric = rbinom(num_individuals, 1, 0.5),
+  H1GH10_numeric = rbinom(num_individuals, 1, 0.5),
+  H1GH11_numeric = rbinom(num_individuals, 1, 0.5),
+  H1GH12_numeric = rbinom(num_individuals, 1, 0.5),
+  H1GH13_numeric = rbinom(num_individuals, 1, 0.5)
+)
+```
+
+### Manually compute ERM
+
+To calculate the similarity between to variables (x and y) by using the covariance. To to this, we centre the values of x and y respectively, then multiply these together for each value, and add this up and divide by the number of individuals we have. 
+
+```{r manually compute social relatedness for individual 1 and 2}
+# variable 1
+sd1 <- sd(dat.erm.sub$H1GH8_numeric)
+mean1 <- mean(dat.erm.sub$H1GH8_numeric)
+
+x11 <- dat.erm.sub[1,1] # individual 1, variable 1
+x21 <- dat.erm.sub[2,1] # individual 2, variable 1
+
+i1 <- ((x11 - mean1)/sd1)*((x21 - mean1)/sd1)
+
+# variable 2
+sd2 <- sd(dat.erm.sub$H1GH9_numeric)
+mean2 <- mean(dat.erm.sub$H1GH9_numeric)
+
+x12 <- dat.erm.sub[1,2] # individual 1, variable 2
+x22 <- dat.erm.sub[2,2] # individual 2, variable 2
+
+i2 <- ((x12 - mean2)/sd2)*((x22 - mean2)/sd2)
+
+# variable 3
+sd3 <- sd(dat.erm.sub$H1GH10_numeric)
+mean3 <- mean(dat.erm.sub$H1GH10_numeric)
+
+x13 <- dat.erm.sub[1,3] # individual 1, variable 3
+x23 <- dat.erm.sub[2,3] # individual 2, variable 3
+
+i3 <- ((x13 - mean3)/sd3)*((x23 - mean3)/sd3)
+
+# variable 4
+sd4 <- sd(dat.erm.sub$H1GH11_numeric)
+mean4 <- mean(dat.erm.sub$H1GH11_numeric)
+
+x14 <- dat.erm.sub[1,4] # individual 1, variable 4
+x24 <- dat.erm.sub[2,4] # individual 2, variable 4
+
+i4 <- ((x14 - mean4)/sd4)*((x24 - mean4)/sd4)
+
+# variable 5
+sd5 <- sd(dat.erm.sub$H1GH12_numeric)
+mean5 <- mean(dat.erm.sub$H1GH12_numeric)
+
+x15 <- dat.erm.sub[1,5] # individual 1, variable 5
+x25 <- dat.erm.sub[2,5] # individual 2, variable 5
+
+i5 <- ((x15 - mean5)/sd5)*((x25 - mean5)/sd5)
+
+# variable 6
+sd6 <- sd(dat.erm.sub$H1GH13_numeric)
+mean6 <- mean(dat.erm.sub$H1GH13_numeric)
+
+x16 <- dat.erm.sub[1,6] # individual 1, variable 6
+x26 <- dat.erm.sub[2,6] # individual 2, variable 6
+
+i6 <- ((x16 - mean6)/sd6)*((x26 - mean6)/sd6)
+
+# sum the i estimates and divide by the number of variables 
+covar_person1_person2 <- (i1 + i2 + i3 + i4 + i5 + i6)/6 
+covar_person1_person2 # this should be the same as the value in the matrix calculated in R and by osca
+```
+
+### Compute ERM using R functions
+
+```{r apply covariance to matrix of 10 individuals and 6 variables}
+# have a look at the data
+dat.erm.sub
+
+# calculate means for each *variable*
+means_2  <- colMeans(dat.erm.sub)
+means_2  # 6 means (6 variables)
+
+# calculate variances for each *variable*
+sds_2  <- apply(dat.erm.sub, 2, sd) # apply variance across all cols (per variable)
+sds_2 
+
+# center the data
+centered_data_2 <- as.matrix(t(apply(dat.erm.sub, 1, function(x){x-means_2}))) # each value minus the mean for that variable
+centered_data_2
+
+standardised_data_2 <- as.matrix(t(apply(centered_data_2, 1, function(x){x/sds_2}))) # each value divided by the standard deviation for that variable
+standardised_data_2
+
+# calculate covariance matrix 
+covariance_matrix_2  <- standardised_data_2 %*% t(standardised_data_2) / ncol(standardised_data_2) #using matrix algebra ERM = EE'/M, E = standardised_data, M = number of measures (6 here)
+
+# lower triangle only
+covariance_matrix_2[upper.tri(covariance_matrix_2)] <- NA
+
+# environmental relatedness matrix for 10 people based on 6 variables
+covariance_matrix_2 
+```
+
+### OSCA
+
+First, you need to create the txt file to read into OSCA - this contains your raw data. 
+
+```{r add ID variable to test data}
+# generate unique random IDs as character strings of random numbers
+generate_unique_ids <- function(n, length) {
+  unique_ids <- character(n)
+  i <- 1
+  while (i <= n) {
+    id <- paste0(sample(0:9, length, replace = TRUE), collapse = "")
+    if (!id %in% unique_ids) {
+      unique_ids[i] <- id
+      i <- i + 1
+    }
+  }
+  unique_ids
+}
+
+# create a vector of unique random IDs
+ids <- generate_unique_ids(num_individuals, 8)
+
+# generate the binary dataset with an ID column
+dat.erm.sub <- tibble(
+  ID = ids,
+  V1 = rbinom(num_individuals, 1, 0.5),
+  V2 = rbinom(num_individuals, 1, 0.5),
+  V3 = rbinom(num_individuals, 1, 0.5),
+  V4 = rbinom(num_individuals, 1, 0.5),
+  V5 = rbinom(num_individuals, 1, 0.5),
+  V6 = rbinom(num_individuals, 1, 0.5)
+)
+```
+
+```{r write test data into txt file}
+write.table(dat.erm.sub, "/yourdirectorywhereoscaissaved/myprofile.txt") # export to txt file to turn into "bod" file in osca - remember to unzip ORM file 
+```
+
+To run code in OSCA, you need to have osca installed in the file you are working in, and then you can run lines of code in your terminal. The following code is used to create bod files (format for osca to use) and the ERM (which is called ORM in osca). 
+
+Downlaods and notation for osca are here: https://yanglab.westlake.edu.cn/software/osca/#Overview 
+
+```{bash create bod and orm}
+./osca_Mac osca --efile myprofile.txt --make-bod --no-fid --out myprofile  # creates text file into bod file to be used in osca
+./osca_Mac osca --befile myprofile --make-orm-gz --out myorm # creates "orm" or in our case "erm" using the new bod file and saves it as a text file
+```
+
+Then you can read the output of this ERM back into R to have a look at it. The results from this should match the manually computed ERM above. 
+
+```{r read in test erm into R}
+# read in orm test - 6 variables, 10 individuals 
+orm_test_raw1 <- read.table("/yourdirectorywhereoscaissaved/myorm.orm")
+
+# select ID variables and estimate
+orm_test1 <- orm_test_raw1 %>%
+  select(V1, V2, V4)
+
+# convert into lower matrix form
+orm_test_wide1 <- orm_test1 %>%
+  pivot_wider(names_from = V2, values_from = V4)
+
+# look at the ORM matrix
+orm_test_wide1
+as.data.frame(covariance_matrix_2) # compare to manual ERM
+```
+
+# Linear mixed model  
+
+To run the linear mixed model, you first create the ERM in your full dataset and include this as a random effect. 
+
+## Dummy data
+
+The below creates dummy data to use for this template script. 
+
+```{r full erm dummy data}
+num_individuals = 1000
+
+# Create a vector of unique random IDs
+ids <- generate_unique_ids(num_individuals, 8)
+
+# generate the binary dataset with an ID column
+dat.erm <- tibble(
+  ID = ids,
+  V1 = rbinom(num_individuals, 1, 0.5),
+  V2 = rbinom(num_individuals, 1, 0.5),
+  V3 = rbinom(num_individuals, 1, 0.5),
+  V4 = rbinom(num_individuals, 1, 0.5),
+  V5 = rbinom(num_individuals, 1, 0.5),
+  V6 = rbinom(num_individuals, 1, 0.5)
+)
+
+# have a look at the data
+dat.erm
+```
+
+Create the data txt file to be used in OSCA. 
+
+```{r write text file for full dummy data}
+# write txt file for osca
+write.table(dat.erm, "/yourdirectorywhereoscaissaved/myprofile_full.txt", row.names = FALSE) 
+```
+
+Create a separate outcome data file. 
+
+```{r outcome data}
+# get outcome data only
+pheno <- dat.erm %>%
+  mutate(AID = ID) %>%  # OSCA needs two ID variables (family ID, individual ID) but in this case they are the same as we have singletons
+  mutate(outcome = sample(0:24, num_individuals, replace = TRUE)) %>%
+  select(AID, ID, outcome)
+
+# write txt file for OSCA
+write.table(pheno, "/yourdirectorywhereoscaissaved/pheno.txt", row.names = FALSE, col.names = FALSE) 
+```
+
+## ERM
+
+Create the ERM/ORM in OSCA:
+
+```{bash erm in full data}
+cd /yourdirectorywhereoscaissaved/osca   # navigate to osca in the terminal
+./osca_Mac osca --efile myprofile_full.txt --make-bod --no-fid --out myprofile_full # using the txt file, create a bod file used to compute erm/orm
+./osca_Mac osca --befile myprofile_full --make-orm-gz --out myprofile_full # create orm using bod file and save output as a txt file
+```
+
+This is saves as a zipped file - so remember to unzip the output on your laptop (ends in .gz) either in the terminal or manually. 
+
+OSCA will tell you how many "probes"/variables are included for how many people, check this matches - 6 probes and 1000 individuals 
+
+Have a look at the ORM created by OSCA:
+
+```{r inspect erm full}
+# read in orm 
+orm_raw <- read.table("/yourdirectorywhereoscaissaved/myprofile_full.orm")
+head(orm_raw) # V1 and V2 are each pair of individuals, V3 is the number of probes
+
+# select ID variables and estimate
+orm <- orm_raw %>%
+  select(V1, V2, V4)
+
+# convert into lower matrix form
+orm_wide <- orm %>%
+  pivot_wider(names_from = V2, values_from = V4)
+
+# look at the ORM 
+orm_wide
+
+# first 10 rows and columns
+orm_wide[c(1:10),c(1:10)]
+```
+
+## REML
+
+Run the following code in osca to estimate a mixed linear model with the ERM as a random effect.
+
+```{bash reml using full data}
+./osca_Mac osca --befile myprofile_theory1_clean --make-orm-bin --out myorm_theory1_clean # create bin file
+./osca_Mac osca --reml --orm myorm_theory1_clean --pheno pheno_A.txt --out reml_A # compute mixed linear model using REML
+```
+
+I have called the output "reml_W1A" 
+
+Below I have given an example of how to run this in a loop in bash if you would like to run this for multiple ERMs. For example, you may have created the ERMs with different sets of variables, you can also apply this to multiple phenotypes/outcomes you want to see how much variance is explained each ERM. 
+
+For this you would need a list of text files in your directory and the code below will iterate through each txt file, create an ERM, and run the REML model. I have given an example here using two phenotypes (outcomes): pheno_A and pheno_B, where I have a list of around 70 ERM txt files that have dropped a single variable each time and recalculated the matrix. 
+
+```{bash}
+# Iterate over each text file in the directory
+for txt_file in *.txt; do
+    # Extract the filename without extension
+    filename=$(basename -- "$txt_file")
+    filename_no_ext="${filename%.*}"
+
+    # Check if the filename matches the names of files to exclude
+    if [[ "$filename" != "pheno_W1A.txt" && "$filename" != "pheno_W1B.txt" ]]; then
+        # Create a bod file
+        ./osca osca --efile "${txt_file}" --make-bod --no-fid --out "${filename_no_ext}"
+
+        # Create orm
+        ./osca osca --befile "${filename_no_ext}" --make-orm-bin --out "myorm_${filename_no_ext}"
+
+        # Run reml for W1A
+        ./osca osca --reml --orm "myorm_${filename_no_ext}" --pheno "pheno_A.txt" --out "reml_A_${filename_no_ext}"
+
+        # Run reml for W1B
+        ./osca osca --reml --orm "myorm_${filename_no_ext}" --pheno "pheno_B.txt" --out "reml_B_${filename_no_ext}"
+    else
+        echo "Skipping excluded file: $filename"
+    fi
+done
+```
+
+This will give you output of .log and .rsq files that begin with "reml_A_" or "reml_B_" and end with the original txt file name. 
+
+## Output 
+
+OSCA provides output that looks like this, for example:
+
+Source	  Variance	  SE
+V(O)	    8.369821	  1.314531
+V(e)	    32.698851	  0.787284
+Vp	      41.068672	  1.523175
+V(O)/Vp  	0.203801	  0.025834
+
+To extract this information from these output files and create a table in r, you can use the following code: 
+
+```{r extract output information and put in a table}
+# get a list of all files in the directory matching the pattern - starting with reml and ending with rsq 
+output_iterations_full <- list.files(path = "/yourdirectorywhereoscaissaved/", pattern = "^reml.*\\.rsq$", full.names = TRUE)
+
+# Initialize an empty list to store the data frames
+output_iterations_full_data_list <- list()
+
+# Loop through each file and read it into a data frame
+for (file in output_iterations_full) {
+  
+    file_name <- basename(file)
+    
+    # Read the file into a data frame
+    data <- read.table(file, nrows = 4, header = TRUE)
+    
+    # Check if "reml_A_" is included in the file name
+    if (grepl("reml_A_", file_name)) {
+        # Add a column named "outcome" with value "A"
+        data$outcome <- "A"
+    } 
+    # Check if "W1B" is included in the file name
+    else if (grepl("reml_B_", file_name)) {
+        # Add a column named "outcome" with value "B"
+        data$outcome <- "B"
+    } 
+    else {
+        # Add a column named "outcome" with value "Unknown" if neither "A" nor "B" is found
+        data$outcome <- "Unknown"
+    }
+    
+    # get name of variable
+    file_suffix <- sub(".*dat_(.*?)\\.rsq", "\\1", file_name)
+    
+    # Add a column named "file_suffix" containing the extracted substring
+    data$variable_excluded <- file_suffix
+    
+    # Add the data frame to the list
+    output_iterations_full_data_list[[file_name]] <- data
+}
+
+# the names of the output files
+names(output_iterations_full_data_list)
+
+# bind all the output files into one dataframe
+output_iterations_full_data_combined <- do.call(rbind, c(output_iterations_full_data_list, make.row.names = FALSE))
+
+# Split these by your two outcomes
+output_iterations_full_data_combined_varexpl_W1A <- output_iterations_full_data_combined %>% filter(Source == "V(O)/Vp" & outcome == "W1A")
+output_iterations_full_data_combined_varexpl_W1B <- output_iterations_full_data_combined %>% filter(Source == "V(O)/Vp" & outcome == "W1B")
+```
+
+***
+
